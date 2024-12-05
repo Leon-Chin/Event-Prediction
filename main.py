@@ -1,3 +1,4 @@
+from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.metrics import accuracy_score, classification_report
 from xgboost import XGBClassifier
 import os
@@ -7,8 +8,8 @@ import pandas as pd
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 import tensorflow as tf
-from tensorflow.keras.layers import Input, MaxPooling1D, Conv1D, Flatten, Dense, Dropout, LayerNormalization, MultiHeadAttention, Add
 from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, LSTM, Dense, Dropout
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 import gensim.downloader as api
@@ -46,55 +47,82 @@ print("start")
 
 
 class Preprocessor:
-    def __init__(self, glove_path=GLOVE_200_CACHE_PATH):
+    def __init__(self, test=False, glove_path=GLOVE_200_CACHE_PATH):
         self.glove_path = glove_path
         self.model = None
         self.original_data = None
         self.label = None
         self.features = None
+        self.test = test
 
     def process(self):
-        if os.path.exists(PROCESSED_DATA_CACHE_PATH):
-            print("Loading processed data from cache...")
-            df = pd.read_csv(PROCESSED_DATA_CACHE_PATH)
-            label = df['EventType'].values
-            features = df.drop(columns=['EventType']).values
-            return label, features
-        self.load_glove_model()
-        if self.original_data is None:
+        if self.test:
+            self.load_glove_model()
             self.load_orginal_data_and_preprocess_tweets()
-        self.process_tweet()
-        return self.label, self.features
+            self.process_tweet()
+            return self.features
+        else:
+            if os.path.exists(PROCESSED_DATA_CACHE_PATH):
+                print("Loading processed data from cache...")
+                df = pd.read_csv(PROCESSED_DATA_CACHE_PATH)
+                label = df['EventType'].values
+                features = df.drop(columns=['EventType']).values
+                return label, features
+            else:
+                self.load_glove_model()
+                if self.original_data is None:
+                    self.load_orginal_data_and_preprocess_tweets()
+                self.process_tweet()
+                return self.label, self.features
 
     def load_orginal_data_and_preprocess_tweets(self, cache_path=PREPROCESSED_TWEETS_CACHE_PATH):
-        if os.path.exists(cache_path):
-            print("Loading preprocessed data from cache...")
-            df = pd.read_csv(cache_path)
-            self.original_data = df
-        else:
-            li = []
-            print("reading file")
-            for filename in os.listdir("train_tweets"):
-                df = pd.read_csv("train_tweets/" + filename)
-                li.append(df)
-
-            print("finished read file")
-            print("--------")
-            df = pd.concat(li, ignore_index=True)
-            print(df.head())
+        if self.test:
+            eval_li = []
+            for filename in os.listdir("eval_tweets"):
+                eval_df = pd.read_csv("eval_tweets/" + filename)
+                eval_li.append(eval_df)
+            eval_df = pd.concat(eval_li, ignore_index=True)
+            print(eval_df.head())
             print("Preprocessing the tweet text~")
-            for i, tweet in enumerate(df['Tweet']):
-                df.at[i, 'Tweet'] = self.preprocess_text(tweet)
+            for i, tweet in enumerate(eval_df['Tweet']):
+                eval_df.at[i, 'Tweet'] = self.preprocess_text(tweet)
                 if i % 10000 == 0:  # 每处理 10000 条打印进度
-                    print(f"Processed {i}/{len(df)} tweets...")
+                    print(f"Processed {i}/{len(eval_df)} tweets...")
             print("Preprocessing complete!")
 
             # save it to cache file
-            df = df.drop_duplicates(
+            eval_df = eval_df.drop_duplicates(
                 subset=['MatchID', 'PeriodID', 'Tweet'], keep='first')
-            df.to_csv(cache_path, index=False)
-            self.original_data = df
-            print(f"Preprocessed data saved to {cache_path}")
+            self.original_data = eval_df
+        else:
+            if os.path.exists(cache_path):
+                print("Loading preprocessed data from cache...")
+                df = pd.read_csv(cache_path)
+                self.original_data = df
+            else:
+                li = []
+                print("reading file")
+                for filename in os.listdir("train_tweets"):
+                    df = pd.read_csv("train_tweets/" + filename)
+                    li.append(df)
+
+                print("finished read file")
+                print("--------")
+                df = pd.concat(li, ignore_index=True)
+                print(df.head())
+                print("Preprocessing the tweet text~")
+                for i, tweet in enumerate(df['Tweet']):
+                    df.at[i, 'Tweet'] = self.preprocess_text(tweet)
+                    if i % 10000 == 0:  # 每处理 10000 条打印进度
+                        print(f"Processed {i}/{len(df)} tweets...")
+                print("Preprocessing complete!")
+
+                # save it to cache file
+                df = df.drop_duplicates(
+                    subset=['MatchID', 'PeriodID', 'Tweet'], keep='first')
+                df.to_csv(cache_path, index=False)
+                self.original_data = df
+                print(f"Preprocessed data saved to {cache_path}")
 
         print("Loaded preprocessed data:")
         print(df.head())
@@ -107,6 +135,7 @@ class Preprocessor:
             print("Downloading GloVe model...")
             self.model = api.load("glove-twitter-200")
             self.model.save(self.glove_path)
+        return self.model
 
     def process_tweet(self, cache_path=GLOVE_TWEET_VECTORS_CACHE_PATH):
         if self.original_data is None:
@@ -164,26 +193,42 @@ class Preprocessor:
 
         print("归一化后的数据：", self.original_data.head())
 
-        if os.path.exists(cache_path):
-            print("Loading tweet vectors from cache...")
-            tweet_vectors = np.load(cache_path)
-        else:
+        if self.test:
             print("Calculating tweet vectors...")
             tweet_vectors = np.vstack([self.word_to_vector(
                 tweet) for tweet in self.original_data['Tweet']])
-            np.save(cache_path,
-                    tweet_vectors)  # 保存到 .npy 文件
             print(
                 f"GloVe embeddings saved to {cache_path}")
+        else:
+            if os.path.exists(cache_path):
+                print("Loading tweet vectors from cache...")
+                tweet_vectors = np.load(cache_path)
+            else:
+                print("Calculating tweet vectors...")
+                tweet_vectors = np.vstack([self.word_to_vector(
+                    tweet) for tweet in self.original_data['Tweet']])
+                np.save(cache_path,
+                        tweet_vectors)  # 保存到 .npy 文件
+                print(
+                    f"GloVe embeddings saved to {cache_path}")
         tweet_df = pd.DataFrame(tweet_vectors, index=self.original_data.index)
         self.original_data = pd.concat(
             [self.original_data, tweet_df], axis=1)
-        self.original_data = self.original_data.drop(
-            columns=['ID', 'Timestamp', 'Tweet'])
-        y = self.original_data['EventType'].values
-        X = self.original_data.drop(columns=['EventType']).values
-        self.label = y
-        self.features = X
+        if self.test:
+            self.original_data = self.original_data.drop(
+                columns=['Timestamp', 'Tweet'])
+        else:
+            self.original_data = self.original_data.drop(
+                columns=['ID', 'Timestamp', 'Tweet'])
+        if not self.test:
+            y = self.original_data['EventType'].values
+            self.label = y
+        if self.test:
+            X = self.original_data.values
+            self.features = X
+        else:
+            X = self.original_data.drop(columns=['EventType']).values
+            self.features = X
         return np.array(tweet_vectors)
 
     def word_to_vector(self, tweet, vector_size=VECTOR_SIZE):
@@ -275,31 +320,33 @@ print(label)
 columns = ['MatchID', 'PeriodID', 'TweetCount',
            'DurationFromMatchStart'] + [str(i) for i in range(200)]
 features_df = pd.DataFrame(features, columns=columns)
-grouped = features_df.groupby(['MatchID', 'PeriodID'])
+features_df['EventType'] = label
+# 分组并计算推文向量均值
 tweet_vector_columns = [str(i) for i in range(200)]
-# 计算每个 period 的推文向量均值、最大值
-aggregated_features = features_df[tweet_vector_columns].apply(
-    lambda x: np.vstack(x).mean(axis=0)  # 推文向量的均值
-).reset_index(name='mean_tweet_vector')
+grouped = features_df.groupby(['MatchID', 'PeriodID'])
 
-# 将数值特征合并
-aggregated_features = aggregated_features.merge(
-    grouped[['TweetCount', 'DurationFromMatchStart']].first().reset_index(),
-    on=['MatchID', 'PeriodID']
-)
+# 聚合推文向量（按均值）
+aggregated_features = grouped[tweet_vector_columns].mean().reset_index()
 
-# 将目标变量合并
-aggregated_features = aggregated_features.merge(
+# 合并数值特征
+numerical_features = grouped[['TweetCount',
+                              'DurationFromMatchStart']].first().reset_index()
+aggregated_features = pd.merge(
+    aggregated_features, numerical_features, on=['MatchID', 'PeriodID'])
+
+# 合并目标变量
+aggregated_features = pd.merge(
+    aggregated_features,
     features_df[['MatchID', 'PeriodID', 'EventType']].drop_duplicates(),
     on=['MatchID', 'PeriodID']
 )
 
-# 最终特征：['tweet_count', 'duration_from_start', 'mean_tweet_vector'] + 'EventType'
-X = np.hstack([
-    aggregated_features[['TweetCount', 'DurationFromMatchStart']].values,
-    np.vstack(aggregated_features['mean_tweet_vector'].values)
-])
-y = aggregated_features['EventType']
+# 准备训练数据
+X = aggregated_features[['TweetCount',
+                         'DurationFromMatchStart'] + tweet_vector_columns].values
+y = aggregated_features['EventType'].values
+
+print(X, y)
 # # attribute value & target value
 # # We drop the non-numerical features and keep the embeddings values for each period
 # X = period_features.drop(
@@ -312,49 +359,85 @@ y = aggregated_features['EventType']
 print(X, y)
 
 # # Train-test split
-# X_train, X_test, y_train, y_test = train_test_split(
-#     X, y, test_size=0.3, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, random_state=42)
 
-# # 初始化 XGBoost 模型
-# model = XGBClassifier(n_estimators=400, max_depth=6,
-#                       learning_rate=0.1, random_state=42)
+# 输入形状：[样本数, 时间步数, 每步特征数]
+# input_layer = Input(shape=(None, 202))
+
+# # LSTM 层
+# x = LSTM(128, return_sequences=False)(input_layer)
+# x = Dropout(0.5)(x)
+# x = Dense(64, activation='relu')(x)
+# x = Dropout(0.5)(x)
+
+# # 输出层
+# output_layer = Dense(1, activation='sigmoid')(x)  # 二分类，改为 softmax 用于多分类
+
+# # 构建模型
+# model = Model(inputs=input_layer, outputs=output_layer)
+# model.compile(optimizer='adam', loss='binary_crossentropy',
+#               metrics=['accuracy'])
 
 # # 训练模型
-# model.fit(X_train, y_train)
+# model.fit(X_train, y_train, epochs=20, batch_size=32, validation_split=0.2)
 
-# # 预测和评估
-# y_pred = model.predict(X_test)
-# accuracy = accuracy_score(y_test, y_pred)
-# print(f"Accuracy: {accuracy}")
-# print(classification_report(y_test, y_pred))
+# # 测试模型
+# loss, accuracy = model.evaluate(X_test, y_test)
+# print(f"Test Accuracy: {accuracy}")
+
+# 初始化 XGBoost 模型
+model = XGBClassifier(n_estimators=400, max_depth=6,
+                      learning_rate=0.1, random_state=42)
+
+# 训练模型
+model.fit(X_train, y_train)
+
+# 预测和评估
+y_pred = model.predict(X_test)
+accuracy = accuracy_score(y_test, y_pred)
+print(f"Accuracy: {accuracy}")
+print(classification_report(y_test, y_pred))
 
 
-# predictions = []
-# # We read each file separately, we preprocess the tweets and then use the classifier to predict the labels.
-# # Finally, we concatenate all predictions into a list that will eventually be concatenated and exported
-# # to be submitted on Kaggle.
-# index = 0
-# for fname in os.listdir("eval_tweets"):
-#     val_df = pd.read_csv("eval_tweets/" + fname)
-#     index += 1
-#     val_df['Tweet'] = val_df['Tweet'].apply(preprocess_text)
+predictions = []
+# We read each file separately, we preprocess the tweets and then use the classifier to predict the labels.
+# Finally, we concatenate all predictions into a list that will eventually be concatenated and exported
+# to be submitted on Kaggle.
+index = 0
+eval_processor = Preprocessor(test=True)
+features = eval_processor.process()
+columns = ['ID', 'MatchID', 'PeriodID', 'TweetCount',
+           'DurationFromMatchStart'] + [str(i) for i in range(200)]
+features_df = pd.DataFrame(features, columns=columns)
+# 分组并计算推文向量均值
+tweet_vector_columns = [str(i) for i in range(200)]
+grouped = features_df.groupby(['MatchID', 'PeriodID'])
 
-#     tweet_vectors = np.vstack([word_to_vector(
-#         tweet, embeddings_model, VECTOR_SIZE) for tweet in val_df['Tweet']])
-#     tweet_df = pd.DataFrame(tweet_vectors)
+# 聚合推文向量（按均值）
+aggregated_features = grouped[tweet_vector_columns].mean().reset_index()
 
-#     submit_features = pd.concat([val_df, tweet_df], axis=1)
-#     submit_features = submit_features.drop(columns=['Timestamp', 'Tweet'])
-#     submit_features = submit_features.groupby(
-#         ['MatchID', 'PeriodID', 'ID']).mean().reset_index()
-#     X = submit_features.drop(
-#         columns=['MatchID', 'PeriodID', 'ID']).values
-#     print(X[0]) if index == 1 else None
-#     preds = model.predict(X)
+# 合并数值特征
+numerical_features = grouped[['TweetCount',
+                              'DurationFromMatchStart']].first().reset_index()
+aggregated_features = pd.merge(
+    aggregated_features, numerical_features, on=['MatchID', 'PeriodID'])
 
-#     submit_features['EventType'] = preds
+# 合并目标变量
+aggregated_features = pd.merge(
+    aggregated_features,
+    features_df[['MatchID', 'PeriodID']].drop_duplicates(),
+    on=['MatchID', 'PeriodID']
+)
 
-#     predictions.append(submit_features[['ID', 'EventType']])
+# 准备训练数据
+X = aggregated_features[['TweetCount',
+                         'DurationFromMatchStart'] + tweet_vector_columns].values
+preds = model.predict(X)
+submit_features = pd.DataFrame(aggregated_features, columns=['ID'])
+submit_features['EventType'] = preds
 
-# pred_df = pd.concat(predictions)
-# pred_df.to_csv('modal_predictions.csv', index=False)
+predictions.append(submit_features[['ID', 'EventType']])
+
+pred_df = pd.concat(predictions)
+pred_df.to_csv('modal_predictions.csv', index=False)
