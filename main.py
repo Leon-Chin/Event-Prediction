@@ -12,10 +12,11 @@ from tensorflow.keras.models import Model
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 import gensim.downloader as api
+from sklearn.preprocessing import MinMaxScaler
 from gensim.models import KeyedVectors
 import nltk
-import contractions
 import emoji
+
 
 nltk.download('stopwords')
 nltk.download('wordnet')
@@ -81,6 +82,8 @@ class Preprocessor:
             print("Preprocessing complete!")
 
             # save it to cache file
+            df = df.drop_duplicates(
+                subset=['MatchID', 'PeriodID', 'Tweet'], keep='first')
             df.to_csv(cache_path, index=False)
             self.original_data = df
             print(f"Preprocessed data saved to {cache_path}")
@@ -100,43 +103,58 @@ class Preprocessor:
     def process_tweet(self, cache_path=GLOVE_TWEET_VECTORS_CACHE_PATH):
         if self.original_data is None:
             self.load_orginal_data_and_preprocess_tweets()
+        self.original_data['Timestamp'] = pd.to_datetime(
+            self.original_data['Timestamp'], errors='coerce')
+
+        # 检查转换后的数据是否有问题
+        if self.original_data['Timestamp'].isnull().any():
+            print(
+                "Warning: Some timestamps could not be converted to datetime. These rows will be dropped.")
+            self.original_data = self.original_data.dropna(
+                subset=['Timestamp'])
 
         tweet_counts = self.original_data.groupby(
             ['MatchID', 'PeriodID']).size().reset_index(name='TweetCount')
         self.original_data = pd.merge(self.original_data, tweet_counts, on=[
-            'MatchID', 'PeriodID'], how='left')
+            'MatchID', 'PeriodID'], how='right')
 
-       # 1. 计算每个比赛的开始时间（Match Start Time）
+        # 计算每个比赛的开始时间
         match_start_times = self.original_data.groupby(
             'MatchID')['Timestamp'].min().reset_index()
         match_start_times.rename(
             columns={'Timestamp': 'MatchStartTime'}, inplace=True)
 
-        # 2. 计算每个阶段的开始时间（Period Start Time）
+        # 计算每个阶段的开始时间
         period_start_times = self.original_data.groupby(['MatchID', 'PeriodID'])[
             'Timestamp'].min().reset_index()
         period_start_times.rename(
             columns={'Timestamp': 'PeriodStartTime'}, inplace=True)
 
-        # 3. 计算从比赛开始到阶段开始的持续时间
-        # 将比赛开始时间合并到阶段开始时间数据框中
+        # 将比赛开始时间合并到阶段开始时间
         period_start_times = pd.merge(
             period_start_times, match_start_times, on='MatchID', how='left')
 
-        # 计算持续时间，单位为秒
+        # 计算持续时间
         period_start_times['DurationFromMatchStart'] = (
             period_start_times['PeriodStartTime'] - period_start_times['MatchStartTime']).dt.total_seconds()
 
-        # 4. 将计算结果合并回原始数据框
-        # 只保留需要的列进行合并
+        # 合并到原始数据
         period_durations = period_start_times[[
             'MatchID', 'PeriodID', 'DurationFromMatchStart']]
-
-        # 将持续时间合并到原始数据框中
         self.original_data = pd.merge(self.original_data, period_durations, on=[
             'MatchID', 'PeriodID'], how='left')
 
-        print("带上时间的数据", self.original_data.head())
+        # 归一化 TweetCount 和 DurationFromMatchStart
+        def normalize_group(group):
+            scaler = MinMaxScaler()
+            group[['TweetCount', 'DurationFromMatchStart']] = scaler.fit_transform(
+                group[['TweetCount', 'DurationFromMatchStart']])
+            return group
+
+        self.original_data = self.original_data.groupby(
+            'MatchID').apply(normalize_group)
+
+        print("归一化后的数据：", self.original_data.head())
 
         if os.path.exists(cache_path):
             print("Loading tweet vectors from cache...")
@@ -144,14 +162,16 @@ class Preprocessor:
         else:
             print("Calculating tweet vectors...")
             tweet_vectors = np.vstack([self.word_to_vector(
-                tweet, self.model, VECTOR_SIZE) for tweet in self.original_data['Tweet']])
+                tweet) for tweet in self.original_data['Tweet']])
             np.save(cache_path,
                     tweet_vectors)  # 保存到 .npy 文件
             print(
                 f"GloVe embeddings saved to {cache_path}")
-
+        tweet_df = pd.DataFrame(tweet_vectors, index=self.original_data.index)
         self.original_data = pd.concat(
-            self.original_data, tweet_vectors, axis=1)
+            [self.original_data, tweet_df], axis=1)
+        self.original_data.to_csv(
+            'preprocessed_original_data.csv', index=False)
         return np.array(tweet_vectors)
 
     def word_to_vector(self, tweet, vector_size=VECTOR_SIZE):
@@ -163,8 +183,6 @@ class Preprocessor:
         return np.mean(word_vectors, axis=0)
 
     def preprocess_text(self, text):  # Text preprocessing
-        # Expand contractions
-        text = contractions.fix(text)
         # normalize the text
         text = text.lower()
         # Remove URLs
