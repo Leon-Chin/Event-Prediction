@@ -272,11 +272,13 @@ print("-------------------------------------------------------------------------
 print(features)
 print("------------------------------------------------------------------------------------")
 print(label)
-
-grouped = features.groupby(['MatchID', 'PeriodID'])
+columns = ['MatchID', 'PeriodID', 'TweetCount',
+           'DurationFromMatchStart'] + [str(i) for i in range(200)]
+features_df = pd.DataFrame(features, columns=columns)
+grouped = features_df.groupby(['MatchID', 'PeriodID'])
 tweet_vector_columns = [str(i) for i in range(200)]
 # 计算每个 period 的推文向量均值、最大值
-aggregated_features = features[tweet_vector_columns].apply(
+aggregated_features = features_df[tweet_vector_columns].apply(
     lambda x: np.vstack(x).mean(axis=0)  # 推文向量的均值
 ).reset_index(name='mean_tweet_vector')
 
@@ -288,7 +290,7 @@ aggregated_features = aggregated_features.merge(
 
 # 将目标变量合并
 aggregated_features = aggregated_features.merge(
-    features[['MatchID', 'PeriodID', 'EventType']].drop_duplicates(),
+    features_df[['MatchID', 'PeriodID', 'EventType']].drop_duplicates(),
     on=['MatchID', 'PeriodID']
 )
 
