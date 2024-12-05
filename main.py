@@ -39,7 +39,7 @@ PREPROCESSED_TWEETS_CACHE_PATH = os.path.join(
 GLOVE_TWEET_VECTORS_CACHE_PATH = os.path.join(
     CACHE_DIR, "glove_tweet_vectors.npy")
 
-PERIOD_FEATURES_CACHE_PATH = os.path.join(CACHE_DIR, "period_features.parquet")
+PROCESSED_DATA_CACHE_PATH = os.path.join(CACHE_DIR, "processed_data.csv")
 
 # Load GloVe embeddings
 print("start")
@@ -50,13 +50,21 @@ class Preprocessor:
         self.glove_path = glove_path
         self.model = None
         self.original_data = None
+        self.label = None
+        self.features = None
 
     def process(self):
+        if os.path.exists(PROCESSED_DATA_CACHE_PATH):
+            print("Loading processed data from cache...")
+            df = pd.read_csv(PROCESSED_DATA_CACHE_PATH)
+            label = df['EventType'].values
+            features = df.drop(columns=['EventType']).values
+            return label, features
         self.load_glove_model()
         if self.original_data is None:
             self.load_orginal_data_and_preprocess_tweets()
         self.process_tweet()
-        return self.original_data
+        return self.label, self.features
 
     def load_orginal_data_and_preprocess_tweets(self, cache_path=PREPROCESSED_TWEETS_CACHE_PATH):
         if os.path.exists(cache_path):
@@ -170,8 +178,12 @@ class Preprocessor:
         tweet_df = pd.DataFrame(tweet_vectors, index=self.original_data.index)
         self.original_data = pd.concat(
             [self.original_data, tweet_df], axis=1)
-        self.original_data.to_csv(
-            'preprocessed_original_data.csv', index=False)
+        self.original_data = self.original_data.drop(
+            columns=['ID', 'Timestamp', 'Tweet'])
+        y = self.original_data['EventType'].values
+        X = self.original_data.drop(columns=['EventType']).values
+        self.label = y
+        self.features = X
         return np.array(tweet_vectors)
 
     def word_to_vector(self, tweet, vector_size=VECTOR_SIZE):
@@ -255,9 +267,37 @@ print("-------------------------------------------------------------------------
 
 
 myProcessor = Preprocessor()
-myProcessor.process()
+(label, features) = myProcessor.process()
+print("------------------------------------------------------------------------------------")
+print(features)
+print("------------------------------------------------------------------------------------")
+print(label)
 
+grouped = features.groupby(['MatchID', 'PeriodID'])
+tweet_vector_columns = [str(i) for i in range(200)]
+# 计算每个 period 的推文向量均值、最大值
+aggregated_features = features[tweet_vector_columns].apply(
+    lambda x: np.vstack(x).mean(axis=0)  # 推文向量的均值
+).reset_index(name='mean_tweet_vector')
 
+# 将数值特征合并
+aggregated_features = aggregated_features.merge(
+    grouped[['TweetCount', 'DurationFromMatchStart']].first().reset_index(),
+    on=['MatchID', 'PeriodID']
+)
+
+# 将目标变量合并
+aggregated_features = aggregated_features.merge(
+    features[['MatchID', 'PeriodID', 'EventType']].drop_duplicates(),
+    on=['MatchID', 'PeriodID']
+)
+
+# 最终特征：['tweet_count', 'duration_from_start', 'mean_tweet_vector'] + 'EventType'
+X = np.hstack([
+    aggregated_features[['TweetCount', 'DurationFromMatchStart']].values,
+    np.vstack(aggregated_features['mean_tweet_vector'].values)
+])
+y = aggregated_features['EventType']
 # # attribute value & target value
 # # We drop the non-numerical features and keep the embeddings values for each period
 # X = period_features.drop(
@@ -267,7 +307,7 @@ myProcessor.process()
 # y = period_features['EventType'].values
 
 
-# print(X, y)
+print(X, y)
 
 # # Train-test split
 # X_train, X_test, y_train, y_test = train_test_split(
