@@ -253,25 +253,17 @@ aggregated_features = pd.merge(
 )
 
 # 准备训练数据
-X = aggregated_features[['TweetCount',
-                         'DurationFromMatchStart'] + tweet_vector_columns].values
+X = aggregated_features[tweet_vector_columns].values
 y = aggregated_features['EventType'].values
 
 print(X, y)
-# # attribute value & target value
-# # We drop the non-numerical features and keep the embeddings values for each period
-# X = period_features.drop(
-#     columns=['EventType', 'MatchID', 'PeriodID', 'ID']).values
-
-# # We extract the labels of our training samples
-# y = period_features['EventType'].values
 
 # # Train-test split
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.3, random_state=42)
 
 # # 初始化 XGBoost 模型
-model = XGBClassifier(n_estimators=400, max_depth=6,
+model = XGBClassifier(n_estimators=1000, max_depth=5,
                       learning_rate=0.1, random_state=42)
 
 # # 训练模型
@@ -464,7 +456,7 @@ print("aggregated_features", aggregated_features.head())
 
 # 准备预测所需的数据 X_eval
 X_eval = aggregated_features[[
-    'TweetCount', 'DurationFromMatchStart'] + tweet_vector_columns].values
+    'TweetCount'] + tweet_vector_columns].values
 
 # 使用训练好的模型进行预测
 preds = model.predict(X_eval)
