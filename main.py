@@ -1,3 +1,7 @@
+from tensorflow.keras.callbacks import ReduceLROnPlateau
+import tensorflow.keras.backend as K
+from sklearn.metrics import classification_report, roc_auc_score
+from tensorflow.keras.callbacks import EarlyStopping
 from sklearn.metrics import accuracy_score, classification_report
 from xgboost import XGBClassifier
 from sklearn.decomposition import PCA
@@ -9,8 +13,10 @@ from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional
 from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import SimpleRNN, Dense, LSTM, GRU
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 import gensim.downloader as api
@@ -179,6 +185,7 @@ class Preprocessor:
                     tweet_vectors)  # 保存到 .npy 文件
             print(
                 f"GloVe embeddings saved to {cache_path}")
+
         tweet_df = pd.DataFrame(tweet_vectors, index=self.original_data.index)
         self.original_data = pd.concat(
             [self.original_data, tweet_df], axis=1)
@@ -234,25 +241,20 @@ columns = ['MatchID', 'PeriodID', 'TweetCount',
            'DurationFromMatchStart'] + [str(i) for i in range(200)]
 features_df = pd.DataFrame(features, columns=columns)
 features_df['EventType'] = label
+
 # 分组并计算推文向量均值
 tweet_vector_columns = [str(i) for i in range(200)]
 grouped = features_df.groupby(['MatchID', 'PeriodID'])
 
+
 # 聚合推文向量（按均值）
 aggregated_features = grouped[tweet_vector_columns].mean().reset_index()
 
+scaler = MinMaxScaler()
 
-# 降维
-reduced_tweet_dim = 100
-pca = PCA(n_components=reduced_tweet_dim)
-reduced_tweet_vectors = pca.fit_transform(
-    aggregated_features[tweet_vector_columns])
-
-reduced_columns = [f"pca_{i}" for i in range(reduced_tweet_dim)]
-aggregated_features = pd.concat(
-    [aggregated_features[['MatchID', 'PeriodID']], pd.DataFrame(
-        reduced_tweet_vectors, columns=reduced_columns)],
-    axis=1
+# 对聚合后的 200 维向量进行归一化
+aggregated_features[tweet_vector_columns] = scaler.fit_transform(
+    aggregated_features[tweet_vector_columns]
 )
 
 # 合并目标变量（EventType）
@@ -270,41 +272,110 @@ X = []
 y = []
 for _, group in grouped:
     group = group.sort_values('PeriodID')
-    features = np.stack(group[reduced_columns].values)  # 使用降维后的特征和数值特征
+    features = np.stack(group[tweet_vector_columns].values)  # 使用降维后的特征和数值特征
     labels = group['EventType'].values
     X.append(features)
     y.append(labels)
 
 
-# 填充特征 period, 因为每一个period的数量不一致
-X = pad_sequences(X, padding='post', dtype='float32')  # 填充特征
-y = pad_sequences(y, padding='post', dtype='int')
-print(X, y)
+# 划分训练集和测试集
 X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.3, random_state=42)
+    X, y, test_size=0.3, random_state=42
+)
 
-model = Sequential([
-    LSTM(128, return_sequences=True, input_shape=(
-        X_train.shape[1], X_train.shape[2])),
-    Dropout(0.3),
-    LSTM(64, return_sequences=True),  # 输出每个时间步
-    Dropout(0.3),
-    Dense(1, activation='sigmoid')  # 每个时间步的输出
-])
-
-# 编译模型
-model.compile(optimizer='adam', loss='binary_crossentropy',
-              metrics=['accuracy'])
+# 初始化 XGBoost 分类器
+xgb_model = XGBClassifier(
+    n_estimators=1000,
+    max_depth=5,
+    learning_rate=0.1,
+    objective='binary:logistic',  # 二分类任务
+    use_label_encoder=False,
+    eval_metric='logloss'
+)
 
 # 训练模型
-model.fit(X_train, y_train, epochs=10, batch_size=16, validation_split=0.2)
+xgb_model.fit(X_train, y_train)
 
-loss, accuracy = model.evaluate(X_test, y_test, batch_size=32)
+# 在测试集上预测
+y_pred = xgb_model.predict(X_test)
+accuracy = accuracy_score(y_test, y_pred)
+print(f"Accuracy: {accuracy}")
+print(classification_report(y_test, y_pred))
+# print("AUC Score:", roc_auc_score(y_test, y_pred_proba))
 
-pred = model.predict(X_test)
-print(pred)
-print(f"Test Loss: {loss}")
-print(f"Test Accuracy: {accuracy}")
+# # 填充特征 period, 因为每一个period的数量不一致
+# X = pad_sequences(X, padding='post', dtype='float32')  # 填充特征
+# y = pad_sequences(y, padding='post', dtype='int')
+# print(X, y)
+# X_train, X_test, y_train, y_test = train_test_split(
+#     X, y, test_size=0.3, random_state=42)
+
+# model = Sequential([
+#     Bidirectional(LSTM(128, return_sequences=True, input_shape=(
+#         X_train.shape[1], X_train.shape[2]))),
+#     Dropout(0.3),
+#     Bidirectional(LSTM(64)),
+#     Dropout(0.3),
+#     Dense(32, activation='relu'),
+#     Dense(1, activation='sigmoid')
+# ])
+
+
+# def focal_loss(gamma=2., alpha=0.25):
+#     def focal_loss_fixed(y_true, y_pred):
+#         y_true = K.cast(y_true, dtype='float32')  # 确保 y_true 类型为 float32
+#         pt_1 = K.clip(y_pred, K.epsilon(), 1 - K.epsilon())
+#         pt_0 = 1 - pt_1
+#         return -K.mean(alpha * K.pow(1. - pt_1, gamma) * y_true * K.log(pt_1) +
+#                        (1 - alpha) * K.pow(1. - pt_0, gamma) * (1 - y_true) * K.log(pt_0))
+#     return focal_loss_fixed
+
+
+# # 转换 y_train 和 y_test 数据类型
+# y_train = y_train.astype('float32')
+# y_test = y_test.astype('float32')
+
+# model.compile(optimizer='adam', loss=focal_loss(), metrics=['accuracy'])
+
+# # 添加 EarlyStopping
+# early_stopping = EarlyStopping(
+#     monitor='val_loss', patience=30, restore_best_weights=True)
+
+
+# lr_scheduler = ReduceLROnPlateau(
+#     monitor='val_loss', factor=0.5, patience=20, verbose=1)
+# model.fit(X_train, y_train, epochs=10, batch_size=16,
+#           validation_split=0.2, callbacks=[lr_scheduler])
+
+# # 训练模型
+# model.fit(X_train, y_train, epochs=100, batch_size=16,
+#           validation_split=0.2)
+
+# # 评估模型
+# loss, accuracy = model.evaluate(X_test, y_test, batch_size=32)
+
+# print(f'Loss: {loss}, Accuracy: {accuracy}')
+
+
+# 预测结果
+# preds = model.predict(X_test)
+# preds_binary = (preds > 0.5).astype(int)
+
+# # 去掉填充值的影响
+# y_test_flat = y_test.flatten()
+# preds_binary_flat = preds_binary.flatten()
+
+# # 假设填充值为 0
+# valid_indices = (y_test_flat != 0)
+# y_test_valid = y_test_flat[valid_indices]
+# preds_binary_valid = preds_binary_flat[valid_indices]
+
+# # 确保形状匹配
+# assert y_test_valid.shape == preds_binary_valid.shape, "Shapes do not match!"
+
+# # 评价指标
+# print(classification_report(y_test_valid, preds_binary_valid))
+# print(f"AUC: {roc_auc_score(y_test_valid, preds[valid_indices].flatten())}")
 
 # class PreprocessorForEvaluation:
 #     def __init__(self, glove_path=GLOVE_200_CACHE_PATH):
